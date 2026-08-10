@@ -55,4 +55,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // 让 Task<T>.await() 可用（相册 scanner.process(input).await()）
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
+
+    // ZXing —— 级联兜底引擎，与 ML Kit 图像处理路径完全不同，能捡到 ML Kit 漏的一部分码
+    implementation("com.google.zxing:core:3.5.3")
 }

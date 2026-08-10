@@ -1,0 +1,102 @@
+package com.demo.scandemo
+
+import android.graphics.ImageFormat
+import android.media.Image
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.NotFoundException
+import com.google.zxing.PlanarYUVLuminanceSource
+import com.google.zxing.Result
+import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.qrcode.QRCodeReader
+
+/**
+ * ZXing 兜底扫描器。策略：
+ *  - 只有 ML Kit 连续 N 帧无结果时才调用（常态零开销）
+ *  - 直接吃 YUV_420_888 的 Y 平面，不做任何 Bitmap 中转（跟 ML Kit 一样避免历史包袱）
+ *  - 启用 TRY_HARDER + PURE_BARCODE 关闭；旋转 90 度重试一次，覆盖竖屏拍横码
+ *
+ * 单例（线程安全靠外层"级联时机"保证只有一个线程调）：ZXing 的 reader 不是线程安全的，
+ * QrAnalyzer 里 ML Kit 回调本身就是串行的（analyzerExecutor 单线程），所以这里也串行。
+ */
+object ZxingFallback {
+
+    private val reader = MultiFormatReader().apply {
+        setHints(
+            mapOf(
+                DecodeHintType.POSSIBLE_FORMATS to listOf(com.google.zxing.BarcodeFormat.QR_CODE),
+                DecodeHintType.TRY_HARDER to true,
+                DecodeHintType.CHARACTER_SET to "UTF-8",
+            )
+        )
+    }
+
+    /**
+     * 从 YUV Image 里扫；扫到就返回 rawValue，扫不到返回 null。
+     * @param rotation 图像顺时针旋转角度（ImageProxy.imageInfo.rotationDegrees）
+     */
+    fun decode(image: Image, rotation: Int): String? {
+        if (image.format != ImageFormat.YUV_420_888) return null
+
+        val plane = image.planes[0] // Y plane
+        val yBuffer = plane.buffer
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        val width = image.width
+        val height = image.height
+
+        // 拷贝 Y 数据到紧凑 byte[]（PlanarYUVLuminanceSource 要求 dataWidth * dataHeight 大小）
+        val data = ByteArray(width * height)
+        if (rowStride == width && pixelStride == 1) {
+            yBuffer.get(data, 0, width * height)
+        } else {
+            val row = ByteArray(rowStride)
+            for (y in 0 until height) {
+                yBuffer.position(y * rowStride)
+                yBuffer.get(row, 0, rowStride)
+                if (pixelStride == 1) {
+                    System.arraycopy(row, 0, data, y * width, width)
+                } else {
+                    for (x in 0 until width) data[y * width + x] = row[x * pixelStride]
+                }
+            }
+        }
+
+        return decodeYuvBytes(data, width, height, rotation)
+    }
+
+    private fun decodeYuvBytes(y: ByteArray, width: Int, height: Int, rotation: Int): String? {
+        // 先按原始朝向扫；扫不到再旋转 90 度扫一次（覆盖横码/竖屏错向）
+        tryDecodeOnce(y, width, height)?.let { return it }
+        if (rotation == 90 || rotation == 270) {
+            val rotated = rotate90(y, width, height)
+            tryDecodeOnce(rotated, height, width)?.let { return it }
+        }
+        return null
+    }
+
+    private fun tryDecodeOnce(y: ByteArray, width: Int, height: Int): String? {
+        val source = PlanarYUVLuminanceSource(y, width, height, 0, 0, width, height, false)
+        val bitmap = BinaryBitmap(HybridBinarizer(source))
+        return try {
+            reader.decodeWithState(bitmap).text
+        } catch (_: NotFoundException) {
+            null
+        } catch (_: Throwable) {
+            null
+        } finally {
+            reader.reset()
+        }
+    }
+
+    private fun rotate90(y: ByteArray, width: Int, height: Int): ByteArray {
+        val out = ByteArray(y.size)
+        for (row in 0 until height) {
+            for (col in 0 until width) {
+                out[col * height + (height - 1 - row)] = y[row * width + col]
+            }
+        }
+        return out
+    }
+}

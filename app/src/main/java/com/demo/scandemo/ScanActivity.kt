@@ -123,8 +123,16 @@ class ScanActivity : AppCompatActivity() {
             val a = QrAnalyzer(
                 analyzerExecutor = cameraExecutor,
                 onZoomRequested = { ratio -> applyZoomFromMlKit(ratio) },
-                onBarcodes = { list -> onBarcodesDetected(list) },
-                onFrameTimings = { cost, _ -> reportFrameTimings(cost) }
+                onBarcodes = { engine, values -> onBarcodesDetected(engine, values) },
+                onFrameTimings = { cost, _ -> reportFrameTimings(cost) },
+                onEngineSwitch = { usingZxingNow ->
+                    runOnUiThread {
+                        binding.tvHint.text = if (usingZxingNow)
+                            "ML Kit 无结果，启用 ZXing 兜底…"
+                        else
+                            getString(R.string.scan_hint)
+                    }
+                }
             )
             analyzer = a
 
@@ -225,16 +233,21 @@ class ScanActivity : AppCompatActivity() {
 
     // ---------------- 识别结果 ----------------
 
-    private fun onBarcodesDetected(barcodes: List<Barcode>) {
+    private fun onBarcodesDetected(engine: ScanEngine, values: List<String>) {
         // 幂等：只处理第一次成功；弹窗关闭前不再处理
         if (!hasResulted.compareAndSet(false, true)) return
-
-        val values = barcodes.mapNotNull { it.rawValue }
-        runOnUiThread { showResult(values) }
+        runOnUiThread { showResult(engine, values) }
     }
 
-    private fun showResult(values: List<String>) {
-        val title = if (values.size == 1) "识别成功" else "识别到 ${values.size} 个二维码"
+    private fun showResult(engine: ScanEngine, values: List<String>) {
+        val engineTag = when (engine) {
+            ScanEngine.ML_KIT -> "🟢 ML Kit"
+            ScanEngine.ZXING -> "🟡 ZXing 兜底"
+        }
+        val title = if (values.size == 1)
+            "识别成功 · $engineTag"
+        else
+            "识别到 ${values.size} 个 · $engineTag"
         val msg = values.joinToString("\n\n")
         AlertDialog.Builder(this)
             .setTitle(title)
@@ -266,8 +279,8 @@ class ScanActivity : AppCompatActivity() {
                 if (valid.isEmpty()) {
                     Toast.makeText(this@ScanActivity, "照片中未识别到二维码", Toast.LENGTH_SHORT).show()
                 } else {
-                    hasResulted.set(false) // 让 showResult 里的 CAS 能通过
-                    onBarcodesDetected(results.filter { !it.rawValue.isNullOrEmpty() })
+                    hasResulted.set(false) // 让 CAS 能通过
+                    onBarcodesDetected(ScanEngine.ML_KIT, valid)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "相册解析失败", e)
