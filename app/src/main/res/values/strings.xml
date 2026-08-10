@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">扫码 Demo</string>
+    <string name="torch_on">开灯</string>
+    <string name="torch_off">关灯</string>
+    <string name="pick_from_gallery">相册</string>
+    <string name="zoom_in">放大</string>
+    <string name="zoom_out">还原</string>
+    <string name="permission_denied">需要相机权限才能扫码</string>
+    <string name="scan_hint">对准二维码，自动识别</string>
+    <string name="hint_stabilize">请保持稳定</string>
+</resources>
