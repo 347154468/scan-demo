@@ -9,7 +9,7 @@ import android.graphics.Rect
 import android.graphics.YuvImage
 import android.media.Image
 import android.util.Log
-import com.king.opencv.OpenCV
+import org.opencv.OpenCV
 import com.king.wechat.qrcode.WeChatQRCodeDetector
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
@@ -46,7 +46,12 @@ object WeChatFallback {
     fun init(context: Context) {
         if (!initStarted.compareAndSet(false, true)) return
         try {
-            OpenCV.initOpenCV()
+            val loaded = OpenCV.initOpenCV()
+            if (!loaded) {
+                ready = false
+                Log.e(TAG, "OpenCV 加载失败，本级兜底将始终不生效")
+                return
+            }
             WeChatQRCodeDetector.init(context.applicationContext)
             ready = true
             Log.d(TAG, "WeChat QRCode 初始化成功")
