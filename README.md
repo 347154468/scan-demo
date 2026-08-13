@@ -16,8 +16,10 @@
 | 9 | `enableAllPotentialBarcodes()` + 过滤空 rawValue | `QrAnalyzer` |
 | — | 删掉冗余 `isProcessing` 锁，只靠 CameraX 背压 + `imageProxy.close()` 时机 | `QrAnalyzer` |
 | — | 屏幕左上角实时 FPS / ML Kit 单帧耗时 / 当前 Zoom | `ScanActivity.reportFrameTimings()` |
+| — | ZXing 二级兜底：ML Kit 连续 15 帧无结果后同帧再扫一次 | `ZxingFallback.kt` |
+| — | WeChat QRCode 三级兜底：ZXing 连续 10 帧也无结果后，异步跑 CNN 定位 + 超分辨率重建，捡回前两者定位算法共同漏掉的粗印刷/透视变形码；相册路径同样是 ML Kit → ZXing → WeChat 三级级联 | `WeChatFallback.kt` |
 
-未覆盖：ROI 裁剪（方案 8）、曝光补偿、wechat_qrcode 级联、Google Code Scanner 兜底。核心方案版为了保持代码干净刻意省略了这些。
+未覆盖：ROI 裁剪（方案 8）、曝光补偿、Google Code Scanner 兜底。核心方案版为了保持代码干净刻意省略了这些。详细设计见 `docs/superpowers/specs/2026-08-13-wechat-qrcode-cascade-design.md`。
 
 ## 运行
 
@@ -56,10 +58,23 @@ gradle wrapper --gradle-version 8.7
 3. **小码/远距**：镜头远离二维码，观察 hint 区域是否出现"自动放大 ×1.5"这类提示 —— 那就是 ML Kit 自动变焦在工作
 4. **暗光**：昏暗环境下点"开灯"补光
 5. **相册**：点"相册"选一张微信/QQ 里保存下来的压缩过的二维码图，看看能否识别
+6. **WeChat 三级兜底**：拿一张点阵较粗 + 透视变形 + JPEG 压缩、ML Kit/ZXing 都识别不了的印刷二维码试：
+   - 实时对屏幕/纸面扫描，hint 提示是否按 ML Kit → ZXing → WeChat 顺序切换，最终能否弹出"🔵 WeChat 兜底"结果
+   - 左上角是否出现单独一行"WeChat: 52ms"这类耗时（只在触发时显示，不计入 FPS/平均耗时统计）
+   - 相册导入同一张图，能否被三级级联救回来
+   - 确认能被 ML Kit 正常识别的码，全程不触发 ZXing/WeChat（左上角不出现 WeChat 耗时行），验证"默认零成本"
 
 ## 依赖版本
 
 - CameraX 1.3.4
 - ML Kit barcode-scanning 17.3.0（自动变焦从 17.2.0 起支持）
-- minSdk 24 / targetSdk 34 / compileSdk 34
+- ZXing core 3.5.3
+- WeChatQRCode（jenly1314 预编译发行版，含 OpenCV + contrib）2.5.0
+- minSdk 24 / targetSdk 34 / compileSdk 35（WeChatQRCode 2.5.0 要求）
 - Kotlin 1.9.24 / AGP 8.5.2 / Gradle 8.7 / JDK 17
+
+## 已知代价
+
+- APK 体积增加（OpenCV + contrib so 库 + 内置模型文件），预估 +30~60MB
+- 引入 native C++ 依赖（`WeChatFallback.kt` 全程 `catch(Throwable)` 兜底已知的 OpenCV native crash 风险，见 [opencv/opencv#27798](https://github.com/opencv/opencv/issues/27798)）
+- WeChat 推理路径引入 YUV→Bitmap 转换开销（约 5-15ms），计入 WeChat 这一级的总耗时预算内

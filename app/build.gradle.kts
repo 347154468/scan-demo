@@ -5,7 +5,8 @@ plugins {
 
 android {
     namespace = "com.demo.scandemo"
-    compileSdk = 34
+    // 35：WeChatQRCode 2.5.0 依赖要求；targetSdk 保持 34 不变，升级只影响编译期 API 可见性
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.demo.scandemo"
@@ -56,6 +57,16 @@ dependencies {
     // 让 Task<T>.await() 可用（相册 scanner.process(input).await()）
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
 
-    // ZXing —— 级联兜底引擎，与 ML Kit 图像处理路径完全不同，能捡到 ML Kit 漏的一部分码
+    // ZXing —— 二级级联兜底引擎，与 ML Kit 图像处理路径完全不同，能捡到 ML Kit 漏的一部分码
     implementation("com.google.zxing:core:3.5.3")
+
+    // WeChat QRCode —— 三级级联兜底（CNN 定位 + 超分辨率重建），覆盖前两者共同的定位算法天花板。
+    // 官方 OpenCV Android AAR 不含 opencv_contrib，这里走第三方预编译发行版 jenly1314/WeChatQRCode，
+    // 模型文件打包在库自身 assets 里，WeChatFallback.init() 会自动拷贝初始化
+    implementation("com.github.jenly1314.WeChatQRCode:opencv:2.5.0")
+    implementation("com.github.jenly1314.WeChatQRCode:opencv-armv64:2.5.0") // 仅 arm64-v8a，覆盖 demo 真机主流架构
+    implementation("com.github.jenly1314.WeChatQRCode:wechat-qrcode:2.5.0")
+
+    // 相册路径需要手动读取 EXIF 方向，摆正喂给 ZXing/WeChat 的 Bitmap
+    implementation("androidx.exifinterface:exifinterface:1.3.7")
 }

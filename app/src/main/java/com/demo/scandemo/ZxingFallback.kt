@@ -1,5 +1,6 @@
 package com.demo.scandemo
 
+import android.graphics.Bitmap
 import android.graphics.ImageFormat
 import android.media.Image
 import com.google.zxing.BinaryBitmap
@@ -7,6 +8,7 @@ import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.NotFoundException
 import com.google.zxing.PlanarYUVLuminanceSource
+import com.google.zxing.RGBLuminanceSource
 import com.google.zxing.Result
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.qrcode.QRCodeReader
@@ -14,11 +16,13 @@ import com.google.zxing.qrcode.QRCodeReader
 /**
  * ZXing 兜底扫描器。策略：
  *  - 只有 ML Kit 连续 N 帧无结果时才调用（常态零开销）
- *  - 直接吃 YUV_420_888 的 Y 平面，不做任何 Bitmap 中转（跟 ML Kit 一样避免历史包袱）
+ *  - 实时路径直接吃 YUV_420_888 的 Y 平面，不做任何 Bitmap 中转（跟 ML Kit 一样避免历史包袱）
+ *  - 相册路径额外提供 decodeBitmap()，走 RGBLuminanceSource（相册场景没有 YUV，只有解码好的 Bitmap）
  *  - 启用 TRY_HARDER + PURE_BARCODE 关闭；旋转 90 度重试一次，覆盖竖屏拍横码
  *
  * 单例（线程安全靠外层"级联时机"保证只有一个线程调）：ZXing 的 reader 不是线程安全的，
  * QrAnalyzer 里 ML Kit 回调本身就是串行的（analyzerExecutor 单线程），所以这里也串行。
+ * decodeBitmap() 供相册路径调用，运行在主线程的协程里，同样不会跟实时路径并发。
  */
 object ZxingFallback {
 
@@ -64,6 +68,28 @@ object ZxingFallback {
         }
 
         return decodeYuvBytes(data, width, height, rotation)
+    }
+
+    /**
+     * 从相册解码出来的 Bitmap 里扫；扫到就返回 rawValue，扫不到返回 null。
+     * 供相册级联路径用（ML Kit 失败 -> 这里 -> 再失败才轮到 WeChat）。
+     */
+    fun decodeBitmap(bitmap: Bitmap): String? {
+        val width = bitmap.width
+        val height = bitmap.height
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        val source = RGBLuminanceSource(width, height, pixels)
+        val binaryBitmap = BinaryBitmap(HybridBinarizer(source))
+        return try {
+            reader.decodeWithState(binaryBitmap).text
+        } catch (_: NotFoundException) {
+            null
+        } catch (_: Throwable) {
+            null
+        } finally {
+            reader.reset()
+        }
     }
 
     private fun decodeYuvBytes(y: ByteArray, width: Int, height: Int, rotation: Int): String? {

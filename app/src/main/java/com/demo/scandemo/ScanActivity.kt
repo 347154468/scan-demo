@@ -2,6 +2,9 @@ package com.demo.scandemo
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
@@ -21,6 +24,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import androidx.exifinterface.media.ExifInterface
 import com.demo.scandemo.databinding.ActivityScanBinding
 import com.google.mlkit.vision.barcode.BarcodeScanner
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
@@ -31,6 +35,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -40,6 +45,7 @@ class ScanActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityScanBinding
     private lateinit var cameraExecutor: ExecutorService
+    private lateinit var wechatExecutor: ExecutorService
     private var analyzer: QrAnalyzer? = null
 
     private var camera: Camera? = null
@@ -72,6 +78,10 @@ class ScanActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         cameraExecutor = Executors.newSingleThreadExecutor()
+        wechatExecutor = Executors.newSingleThreadExecutor()
+        // 懒加载初始化 WeChat 引擎；耗时操作丢到后台线程，不卡启动。真正用到时大概率已就绪，
+        // 没就绪也没关系——WeChatFallback.decode() 在未就绪时直接返回 null，不影响前两级
+        wechatExecutor.execute { WeChatFallback.init(applicationContext) }
 
         binding.btnTorch.setOnClickListener { toggleTorch() }
         binding.btnZoom.setOnClickListener { toggleZoom() }
@@ -92,6 +102,8 @@ class ScanActivity : AppCompatActivity() {
         analyzer?.shutdown()
         cameraExecutor.shutdown()
         try { cameraExecutor.awaitTermination(500, TimeUnit.MILLISECONDS) } catch (_: Exception) {}
+        wechatExecutor.shutdown()
+        try { wechatExecutor.awaitTermination(500, TimeUnit.MILLISECONDS) } catch (_: Exception) {}
     }
 
     // 恢复扫码（弹窗关闭后）
@@ -122,15 +134,26 @@ class ScanActivity : AppCompatActivity() {
 
             val a = QrAnalyzer(
                 analyzerExecutor = cameraExecutor,
+                wechatExecutor = wechatExecutor,
                 onZoomRequested = { ratio -> applyZoomFromMlKit(ratio) },
                 onBarcodes = { engine, values -> onBarcodesDetected(engine, values) },
                 onFrameTimings = { cost, _ -> reportFrameTimings(cost) },
-                onEngineSwitch = { usingZxingNow ->
+                onEngineSwitch = { usingZxingNow, usingWechatNow ->
                     runOnUiThread {
-                        binding.tvHint.text = if (usingZxingNow)
-                            "ML Kit 无结果，启用 ZXing 兜底…"
-                        else
-                            getString(R.string.scan_hint)
+                        binding.tvHint.text = when {
+                            usingWechatNow -> "ZXing 也无结果，启用 WeChat 兜底…"
+                            usingZxingNow -> "ML Kit 无结果，启用 ZXing 兜底…"
+                            else -> getString(R.string.scan_hint)
+                        }
+                        if (!usingWechatNow) {
+                            binding.tvWechatStats.visibility = View.GONE
+                        }
+                    }
+                },
+                onWeChatTiming = { ms ->
+                    runOnUiThread {
+                        binding.tvWechatStats.text = "WeChat: ${ms}ms"
+                        binding.tvWechatStats.visibility = View.VISIBLE
                     }
                 }
             )
@@ -243,6 +266,7 @@ class ScanActivity : AppCompatActivity() {
         val engineTag = when (engine) {
             ScanEngine.ML_KIT -> "🟢 ML Kit"
             ScanEngine.ZXING -> "🟡 ZXing 兜底"
+            ScanEngine.WECHAT -> "🔵 WeChat 兜底"
         }
         val title = if (values.size == 1)
             "识别成功 · $engineTag"
@@ -260,7 +284,9 @@ class ScanActivity : AppCompatActivity() {
 
     // ---------------- 相册识别 ----------------
 
-    // 关键：InputImage.fromFilePath 自动做 EXIF 旋转 + 智能降采样，不用自己搭 Glide 管线
+    // 三级级联：ML Kit（InputImage.fromFilePath 自动 EXIF 旋转 + 智能降采样）
+    // -> 失败则 ZxingFallback.decodeBitmap() -> 失败则 WeChatFallback.decode()
+    // 后两级需要一份手动解码 + 手动摆正 EXIF 的 Bitmap（ML Kit 内部管线拿不到中间 Bitmap）
     private fun decodeFromUri(uri: Uri) {
         val opts = BarcodeScannerOptions.Builder()
             .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
@@ -275,12 +301,38 @@ class ScanActivity : AppCompatActivity() {
                 val results = scanner.process(input).await()
                 val cost = System.currentTimeMillis() - start
                 val valid = results.mapNotNull { it.rawValue }.filter { it.isNotEmpty() }
-                Log.d(TAG, "相册识别耗时 ${cost}ms，命中 ${valid.size} 个")
-                if (valid.isEmpty()) {
-                    Toast.makeText(this@ScanActivity, "照片中未识别到二维码", Toast.LENGTH_SHORT).show()
-                } else {
+                Log.d(TAG, "相册识别耗时 ${cost}ms，命中 ${valid.size} 个（ML Kit）")
+
+                if (valid.isNotEmpty()) {
                     hasResulted.set(false) // 让 CAS 能通过
                     onBarcodesDetected(ScanEngine.ML_KIT, valid)
+                    return@launch
+                }
+
+                // ML Kit 失败 -> 解一份 Bitmap 给 ZXing / WeChat 用
+                val bitmap = withContext(Dispatchers.IO) { decodeBitmapWithExif(uri) }
+                if (bitmap == null) {
+                    Toast.makeText(this@ScanActivity, "照片中未识别到二维码", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
+
+                val zxingResult = withContext(Dispatchers.Default) {
+                    try { ZxingFallback.decodeBitmap(bitmap) } catch (_: Throwable) { null }
+                }
+                if (!zxingResult.isNullOrEmpty()) {
+                    hasResulted.set(false)
+                    onBarcodesDetected(ScanEngine.ZXING, listOf(zxingResult))
+                    return@launch
+                }
+
+                val wechatResult = withContext(Dispatchers.Default) {
+                    try { WeChatFallback.decode(bitmap) } catch (_: Throwable) { null }
+                }
+                if (!wechatResult.isNullOrEmpty()) {
+                    hasResulted.set(false)
+                    onBarcodesDetected(ScanEngine.WECHAT, listOf(wechatResult))
+                } else {
+                    Toast.makeText(this@ScanActivity, "照片中未识别到二维码", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "相册解析失败", e)
@@ -289,6 +341,25 @@ class ScanActivity : AppCompatActivity() {
                 scanner.close()
             }
         }
+    }
+
+    // BitmapFactory 解码 + 手动读取 EXIF 方向摆正（InputImage.fromFilePath 内部做了这一步，
+    // 但这里是给 ZXing/WeChat 用的独立 Bitmap，要自己补上，否则竖拍照片会被判定为横向）
+    private fun decodeBitmapWithExif(uri: Uri): Bitmap? {
+        val original = contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+            ?: return null
+        val rotation = contentResolver.openInputStream(uri)?.use { stream ->
+            val exif = ExifInterface(stream)
+            when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                else -> 0
+            }
+        } ?: 0
+        if (rotation == 0) return original
+        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+        return Bitmap.createBitmap(original, 0, 0, original.width, original.height, matrix, true)
     }
 
     companion object {
