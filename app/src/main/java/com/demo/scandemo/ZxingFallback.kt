@@ -40,21 +40,36 @@ object ZxingFallback {
      * 从 YUV Image 里扫；扫到就返回 rawValue，扫不到返回 null。
      * @param rotation 图像顺时针旋转角度（ImageProxy.imageInfo.rotationDegrees）
      */
-    fun decode(image: Image, rotation: Int): String? {
+    fun decode(image: Image, rotation: Int): String? = try {
+        decodeInternal(image, rotation)
+    } catch (t: Throwable) {
+        // 稳妥兜底：任何异常都不能扩散到 QrAnalyzer 之外
+        android.util.Log.e("ZxingFallback", "decode() 异常，本帧跳过", t)
+        null
+    }
+
+    private fun decodeInternal(image: Image, rotation: Int): String? {
         if (image.format != ImageFormat.YUV_420_888) return null
 
         val plane = image.planes[0] // Y plane
-        val yBuffer = plane.buffer
+        // duplicate + rewind：避免污染原 buffer position，也不受 ML Kit 之前读取的影响
+        // （ImageProxy 是同一份 mediaImage；ML Kit 先跑过一次，buffer position 可能已经不在 0）
+        val yBuffer = plane.buffer.duplicate().apply { rewind() }
         val rowStride = plane.rowStride
         val pixelStride = plane.pixelStride
         val width = image.width
         val height = image.height
+        val remaining = yBuffer.remaining()
 
         // 拷贝 Y 数据到紧凑 byte[]（PlanarYUVLuminanceSource 要求 dataWidth * dataHeight 大小）
         val data = ByteArray(width * height)
         if (rowStride == width && pixelStride == 1) {
+            if (remaining < width * height) return null
             yBuffer.get(data, 0, width * height)
         } else {
+            // 严格边界检查：最后一行读到 (height - 1) * rowStride + rowStride，一旦 buffer 不够就放弃
+            val needed = (height - 1) * rowStride + rowStride
+            if (remaining < needed) return null
             val row = ByteArray(rowStride)
             for (y in 0 until height) {
                 yBuffer.position(y * rowStride)
@@ -117,7 +132,8 @@ object ZxingFallback {
     }
 
     private fun rotate90(y: ByteArray, width: Int, height: Int): ByteArray {
-        val out = ByteArray(y.size)
+        require(y.size >= width * height) { "rotate90: y buffer too small: ${y.size} < ${width * height}" }
+        val out = ByteArray(width * height)
         for (row in 0 until height) {
             for (col in 0 until width) {
                 out[col * height + (height - 1 - row)] = y[row * width + col]

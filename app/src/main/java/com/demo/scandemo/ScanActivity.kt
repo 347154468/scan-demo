@@ -74,6 +74,17 @@ class ScanActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 极简崩溃捕获：装上以后所有未捕获异常都会持久化，下一次启动 Toast 告诉你
+        CrashCatcher.install(this)
+        CrashCatcher.consumeLastCrash(this)?.let { crash ->
+            Log.e(TAG, "上次崩溃：\n$crash")
+            AlertDialog.Builder(this)
+                .setTitle("上次崩溃了")
+                .setMessage(crash.take(2000))
+                .setPositiveButton("知道了", null)
+                .show()
+        }
+
         binding = ActivityScanBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
