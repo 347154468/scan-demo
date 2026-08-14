@@ -301,18 +301,20 @@ class ScanActivity : AppCompatActivity() {
 
     // ---------------- WeChat 兜底（共用抓图 + 解码路径） ----------------
 
-    // 级联触发点会调这里：主线程抓 previewView.bitmap（PreviewView 要求主线程访问）
-    // -> 丢到 Default 线程池 decode -> 结果回主线程展示 -> 无论成败都调 done() 释放 wechatBusy
+    // 级联触发点会调这里：注意 trigger 是从 analyzerExecutor（后台线程）派发过来的，
+    // 而 PreviewView.getBitmap() 强制要求主线程 —— 所以整个流程必须先切主线程。
+    // 主线程抓 previewView.bitmap -> 丢 Default 线程池 decode -> 结果回主线程展示
+    // -> 无论成败都调 done() 释放 wechatBusy
     private fun runWeChatWithPreviewBitmap(done: () -> Unit) {
-        val bitmap = binding.previewView.bitmap
-        if (bitmap == null) {
-            Log.w(TAG, "级联触发 WeChat：previewView.bitmap == null，跳过")
-            done()
-            return
-        }
         val ready = WeChatFallback.isReady()
-        Log.d(TAG, "级联触发 WeChat：ready=$ready，图片 ${bitmap.width}x${bitmap.height}")
         CoroutineScope(Dispatchers.Main).launch {
+            val bitmap = binding.previewView.bitmap
+            if (bitmap == null) {
+                Log.w(TAG, "级联触发 WeChat：previewView.bitmap == null，跳过")
+                done()
+                return@launch
+            }
+            Log.d(TAG, "级联触发 WeChat：ready=$ready，图片 ${bitmap.width}x${bitmap.height}")
             val start = System.currentTimeMillis()
             val result = withContext(Dispatchers.Default) {
                 try { WeChatFallback.decode(bitmap) } catch (t: Throwable) {
