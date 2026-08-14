@@ -9,4 +9,5 @@
     <string name="permission_denied">需要相机权限才能扫码</string>
     <string name="scan_hint">对准二维码，自动识别</string>
     <string name="hint_stabilize">请保持稳定</string>
+    <string name="scan_by_huawei">华为</string>
 </resources>

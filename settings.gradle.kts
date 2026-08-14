@@ -16,6 +16,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // 华为 Scan Kit 只在华为自家仓库分发（不上 Maven Central）
+        maven { url = uri("https://developer.huawei.com/repo/") }
     }
 }
 

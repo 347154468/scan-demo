@@ -69,4 +69,9 @@ dependencies {
 
     // 相册路径需要手动读取 EXIF 方向，摆正喂给 ZXing/WeChat 的 Bitmap
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+
+    // 华为 Scan Kit —— 方案 A：只作诊断/对比入口，用 ScanUtil.startScan() 拉起华为默认全屏扫码 UI
+    // scan 只需要基础引擎；scanplus 是扩展包（多码识别等），当前诊断入口用不到，不加
+    // 华为机内置 HMS Core 直接跑；非华为机需要 HMS Core APK 才能识别（否则会跳权限/提示安装）
+    implementation("com.huawei.hms:scan:2.15.0.301")
 }

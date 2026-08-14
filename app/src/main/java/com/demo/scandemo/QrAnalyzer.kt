@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * 命中引擎。
  */
-enum class ScanEngine { ML_KIT, ZXING, WECHAT }
+enum class ScanEngine { ML_KIT, ZXING, WECHAT, HUAWEI }
 
 /**
  * 帧分析器。方案要点：

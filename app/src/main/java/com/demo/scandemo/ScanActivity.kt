@@ -1,6 +1,8 @@
 package com.demo.scandemo
 
 import android.Manifest
+import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -31,6 +33,9 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.huawei.hms.hmsscankit.ScanUtil
+import com.huawei.hms.ml.scan.HmsScan
+import com.huawei.hms.ml.scan.HmsScanAnalyzerOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -100,6 +105,7 @@ class ScanActivity : AppCompatActivity() {
         // 用于分辨"WeChat 引擎本身没效果" vs "级联条件没触发到 WeChat"
         binding.btnZoom.setOnLongClickListener { forceWeChatDecodeCurrentFrame(); true }
         binding.btnGallery.setOnClickListener { pickImage.launch("image/*") }
+        binding.btnHuawei.setOnClickListener { startHuaweiScan() }
         binding.previewView.setOnTouchListener(previewTouchListener)
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
@@ -284,6 +290,7 @@ class ScanActivity : AppCompatActivity() {
             ScanEngine.ML_KIT -> "🟢 ML Kit"
             ScanEngine.ZXING -> "🟡 ZXing 兜底"
             ScanEngine.WECHAT -> "🔵 WeChat 兜底"
+            ScanEngine.HUAWEI -> "🟣 华为 Scan Kit"
         }
         val title = if (values.size == 1)
             "识别成功 · $engineTag"
@@ -297,6 +304,36 @@ class ScanActivity : AppCompatActivity() {
             .setNegativeButton("关闭", null)
             .setOnDismissListener { resumeScan() }
             .show()
+    }
+
+    // ---------------- 华为 Scan Kit（方案 A：诊断/对比入口） ----------------
+
+    // 用 ScanUtil.startScan 拉起华为自带的全屏扫码 UI；识别成功回到我们自己的 onActivityResult
+    // 不动主路（ML Kit + ZXing + WeChat）；只用来对比华为方案在真机上的识别能力
+    private fun startHuaweiScan() {
+        val opts = HmsScanAnalyzerOptions.Creator()
+            .setHmsScanTypes(HmsScan.QRCODE_SCAN_TYPE)
+            .create()
+        ScanUtil.startScan(this, REQ_HUAWEI_SCAN, opts)
+    }
+
+    @Deprecated("使用新的 ActivityResult API 更好，但 Scan Kit 官方推荐用 startActivityForResult；简单起见先保留")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_HUAWEI_SCAN) return
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            Log.d(TAG, "华为扫码取消 / 无结果 resultCode=$resultCode")
+            return
+        }
+        val hmsScan = data.getParcelableExtra<HmsScan>(ScanUtil.RESULT)
+        val text = hmsScan?.originalValue.orEmpty()
+        if (text.isNotEmpty()) {
+            Log.d(TAG, "华为扫码命中：${text.take(60)}")
+            hasResulted.set(false) // 让 onBarcodesDetected 的 CAS 能通过
+            onBarcodesDetected(ScanEngine.HUAWEI, listOf(text))
+        } else {
+            Toast.makeText(this, "华为扫码未识别", Toast.LENGTH_SHORT).show()
+        }
     }
 
     // ---------------- WeChat 兜底（共用抓图 + 解码路径） ----------------
@@ -448,5 +485,6 @@ class ScanActivity : AppCompatActivity() {
 
     companion object {
         private const val TAG = "ScanDemo"
+        private const val REQ_HUAWEI_SCAN = 0x1001
     }
 }
