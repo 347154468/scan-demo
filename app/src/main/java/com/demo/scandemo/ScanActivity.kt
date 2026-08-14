@@ -158,7 +158,10 @@ class ScanActivity : AppCompatActivity() {
                         binding.tvWechatStats.text = "WeChat: ${ms}ms"
                         binding.tvWechatStats.visibility = View.VISIBLE
                     }
-                }
+                },
+                // Analyzer 只发出"该跑 WeChat 了"信号，实际用 previewView.bitmap 抓图 + 后台 decode
+                // 在这里统一做（跟长按放大按钮的诊断路径完全一致，实测能识别）
+                onWeChatFallbackTrigger = { done -> runWeChatWithPreviewBitmap(done) }
             )
             analyzer = a
 
@@ -285,10 +288,39 @@ class ScanActivity : AppCompatActivity() {
             .show()
     }
 
-    // ---------------- 诊断入口 ----------------
+    // ---------------- WeChat 兜底（共用抓图 + 解码路径） ----------------
 
-    // 长按放大按钮触发：抓当前 PreviewView 里的一帧 Bitmap，强制送 WeChat 引擎跑一次
-    // 目的：区分"WeChat 引擎有没有能力识别当前这张码" vs "级联触发条件太严导致根本没跑到 WeChat"
+    // 级联触发点会调这里：主线程抓 previewView.bitmap（PreviewView 要求主线程访问）
+    // -> 丢到 Default 线程池 decode -> 结果回主线程展示 -> 无论成败都调 done() 释放 wechatBusy
+    private fun runWeChatWithPreviewBitmap(done: () -> Unit) {
+        val bitmap = binding.previewView.bitmap
+        if (bitmap == null) {
+            Log.w(TAG, "级联触发 WeChat：previewView.bitmap == null，跳过")
+            done()
+            return
+        }
+        val ready = WeChatFallback.isReady()
+        Log.d(TAG, "级联触发 WeChat：ready=$ready，图片 ${bitmap.width}x${bitmap.height}")
+        CoroutineScope(Dispatchers.Main).launch {
+            val start = System.currentTimeMillis()
+            val result = withContext(Dispatchers.Default) {
+                try { WeChatFallback.decode(bitmap) } catch (t: Throwable) {
+                    Log.e(TAG, "级联 WeChat 异常", t); null
+                }
+            }
+            val cost = System.currentTimeMillis() - start
+            binding.tvWechatStats.text = "WeChat: ${cost}ms"
+            binding.tvWechatStats.visibility = View.VISIBLE
+            if (!result.isNullOrEmpty()) {
+                analyzer?.notifyExternalHit()
+                onBarcodesDetected(ScanEngine.WECHAT, listOf(result))
+            }
+            // 无论有没有识别到，都要释放槽位；下一个 WeChat 触发窗口才能进入
+            done()
+        }
+    }
+
+    // 长按放大按钮触发：手动强制走一次 WeChat，绕开级联判定；诊断专用
     private fun forceWeChatDecodeCurrentFrame() {
         val bitmap = binding.previewView.bitmap
         if (bitmap == null) {

@@ -38,6 +38,15 @@ enum class ScanEngine { ML_KIT, ZXING, WECHAT }
  *     wechatBusy 保证同一时刻只有一个 WeChat 任务在跑，上一个没完成就直接丢弃新的触发信号，
  *     不排队——这一级本就是低频兜底，不追求"每次触发都跑到"。
  */
+/**
+ * WeChat 兜底触发信号：Analyzer 只负责判断"什么时候该触发"，实际"用什么图去解码"完全外包给外部。
+ * 之所以外包：手写的 yuvToBitmap 路径经实测识别不出 previewView 能识别的码，
+ * 所以改由 Activity 在主线程抓 previewView.bitmap 后再走 WeChat；抓图/解码/结果回传的完整生命周期
+ * 都由外部管理，Analyzer 只在最后收到 done() 回调时释放 wechatBusy 槽位。
+ * yuvToBitmap 相关代码保留在 WeChatFallback.kt 里作为诊断和未来回退用。
+ */
+typealias WeChatFallbackTrigger = (done: () -> Unit) -> Unit
+
 class QrAnalyzer(
     private val analyzerExecutor: Executor,
     private val wechatExecutor: Executor,
@@ -46,6 +55,7 @@ class QrAnalyzer(
     private val onFrameTimings: ((processingMs: Long, arriveIntervalMs: Long) -> Unit)? = null,
     private val onEngineSwitch: ((usingZxingNow: Boolean, usingWechatNow: Boolean) -> Unit)? = null,
     private val onWeChatTiming: ((ms: Long) -> Unit)? = null,
+    private val onWeChatFallbackTrigger: WeChatFallbackTrigger? = null,
 ) : ImageAnalysis.Analyzer {
 
     private val scanner: BarcodeScanner by lazy {
@@ -142,36 +152,16 @@ class QrAnalyzer(
                             switchEngineHintIfNeeded(usingZxingNow = true, usingWechatNow = false)
                         } else {
                             switchEngineHintIfNeeded(usingZxingNow = true, usingWechatNow = true)
-                            // 必须在 imageProxy.close() 之前完成 YUV -> Bitmap 拷贝
-                            val bitmap = try {
-                                WeChatFallback.yuvToBitmap(mediaImage, rotation)
-                            } catch (t: Throwable) {
-                                Log.e(TAG, "YUV -> Bitmap 转换异常，WeChat 本帧跳过", t)
-                                null
-                            }
-                            if (bitmap == null) {
-                                Log.w(TAG, "yuvToBitmap 返回 null，WeChat 本帧跳过")
+                            // 抓图 + 解码完全外包（Activity 在主线程抓 previewView.bitmap
+                            // -> 丢到 wechatExecutor 后台跑 -> 结果通过 onBarcodes 回传
+                            // -> 无论成败都会调 done() 释放槽位）
+                            val trigger = onWeChatFallbackTrigger
+                            if (trigger == null) {
+                                Log.w(TAG, "onWeChatFallbackTrigger 未注册，跳过并释放槽位")
                                 wechatBusy.set(false)
                             } else {
-                                Log.d(TAG, "WeChat 任务已提交到 wechatExecutor（图片 ${bitmap.width}x${bitmap.height}）")
-                                wechatExecutor.execute {
-                                    try {
-                                        val wechatStart = System.currentTimeMillis()
-                                        val wechatResult = WeChatFallback.decode(bitmap)
-                                        val wechatCost = System.currentTimeMillis() - wechatStart
-                                        Log.d(TAG, "WeChat 执行完成，耗时 ${wechatCost}ms，命中=${!wechatResult.isNullOrEmpty()}")
-                                        onWeChatTiming?.invoke(wechatCost)
-                                        if (!wechatResult.isNullOrEmpty()) {
-                                            consecutiveMisses.set(0)
-                                            consecutiveZxingMisses.set(0)
-                                            onBarcodes(ScanEngine.WECHAT, listOf(wechatResult))
-                                        }
-                                    } catch (t: Throwable) {
-                                        Log.e(TAG, "WeChat 任务异常", t)
-                                    } finally {
-                                        wechatBusy.set(false)
-                                    }
-                                }
+                                Log.d(TAG, "WeChat 触发信号已发出，等待外部抓图 + 解码")
+                                trigger { wechatBusy.set(false) }
                             }
                         }
                     } else {
@@ -196,6 +186,12 @@ class QrAnalyzer(
             wasUsingWechat = usingWechatNow
             onEngineSwitch?.invoke(usingZxingNow, usingWechatNow)
         }
+    }
+
+    /** 外部的 WeChat 兜底命中后调用，清掉 ML Kit / ZXing 的 miss 计数，避免下一帧立刻再次触发。 */
+    fun notifyExternalHit() {
+        consecutiveMisses.set(0)
+        consecutiveZxingMisses.set(0)
     }
 
     fun shutdown() {
