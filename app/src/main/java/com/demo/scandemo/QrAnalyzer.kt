@@ -11,6 +11,7 @@ import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.ZoomSuggestionOptions
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import android.util.Log
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -103,11 +104,15 @@ class QrAnalyzer(
 
                 // ML Kit 未命中 —— 是否触发 ZXing 兜底
                 val misses = consecutiveMisses.incrementAndGet()
+                if (misses == ZXING_FALLBACK_AFTER) {
+                    Log.d(TAG, "ML Kit 连续 $misses 帧无结果，开始启用 ZXing 兜底")
+                }
                 if (misses >= ZXING_FALLBACK_AFTER) {
                     val zxingStart = System.currentTimeMillis()
                     val zxingResult = try {
                         ZxingFallback.decode(mediaImage, rotation)
-                    } catch (_: Throwable) {
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "ZXing 解码异常，本帧跳过", t)
                         null
                     }
                     val zxingCost = System.currentTimeMillis() - zxingStart
@@ -115,6 +120,7 @@ class QrAnalyzer(
                     onFrameTimings?.invoke(totalCost, interval)
 
                     if (!zxingResult.isNullOrEmpty()) {
+                        Log.d(TAG, "ZXing 命中：${zxingResult.take(60)}")
                         consecutiveMisses.set(0)
                         consecutiveZxingMisses.set(0)
                         switchEngineHintIfNeeded(usingZxingNow = true, usingWechatNow = false)
@@ -124,30 +130,47 @@ class QrAnalyzer(
 
                     // ZXing 也未命中 —— 是否触发 WeChat 兜底
                     val zxingMisses = consecutiveZxingMisses.incrementAndGet()
-                    if (zxingMisses >= WECHAT_FALLBACK_AFTER && wechatBusy.compareAndSet(false, true)) {
-                        switchEngineHintIfNeeded(usingZxingNow = true, usingWechatNow = true)
-                        // 必须在 imageProxy.close() 之前完成 YUV -> Bitmap 拷贝
-                        val bitmap = try {
-                            WeChatFallback.yuvToBitmap(mediaImage, rotation)
-                        } catch (_: Throwable) {
-                            null
-                        }
-                        if (bitmap == null) {
-                            wechatBusy.set(false)
+                    if (zxingMisses == WECHAT_FALLBACK_AFTER) {
+                        Log.d(TAG, "ZXing 连续 $zxingMisses 帧无结果，开始尝试触发 WeChat 兜底（ready=${WeChatFallback.isReady()}, wechatBusy=${wechatBusy.get()}）")
+                    }
+                    if (zxingMisses >= WECHAT_FALLBACK_AFTER) {
+                        if (!wechatBusy.compareAndSet(false, true)) {
+                            // 上一个 WeChat 任务还没跑完，本帧丢弃，正常现象
+                            if (zxingMisses == WECHAT_FALLBACK_AFTER) {
+                                Log.d(TAG, "WeChat 触发被跳过：上一个任务仍在运行")
+                            }
+                            switchEngineHintIfNeeded(usingZxingNow = true, usingWechatNow = false)
                         } else {
-                            wechatExecutor.execute {
-                                try {
-                                    val wechatStart = System.currentTimeMillis()
-                                    val wechatResult = WeChatFallback.decode(bitmap)
-                                    val wechatCost = System.currentTimeMillis() - wechatStart
-                                    onWeChatTiming?.invoke(wechatCost)
-                                    if (!wechatResult.isNullOrEmpty()) {
-                                        consecutiveMisses.set(0)
-                                        consecutiveZxingMisses.set(0)
-                                        onBarcodes(ScanEngine.WECHAT, listOf(wechatResult))
+                            switchEngineHintIfNeeded(usingZxingNow = true, usingWechatNow = true)
+                            // 必须在 imageProxy.close() 之前完成 YUV -> Bitmap 拷贝
+                            val bitmap = try {
+                                WeChatFallback.yuvToBitmap(mediaImage, rotation)
+                            } catch (t: Throwable) {
+                                Log.e(TAG, "YUV -> Bitmap 转换异常，WeChat 本帧跳过", t)
+                                null
+                            }
+                            if (bitmap == null) {
+                                Log.w(TAG, "yuvToBitmap 返回 null，WeChat 本帧跳过")
+                                wechatBusy.set(false)
+                            } else {
+                                Log.d(TAG, "WeChat 任务已提交到 wechatExecutor（图片 ${bitmap.width}x${bitmap.height}）")
+                                wechatExecutor.execute {
+                                    try {
+                                        val wechatStart = System.currentTimeMillis()
+                                        val wechatResult = WeChatFallback.decode(bitmap)
+                                        val wechatCost = System.currentTimeMillis() - wechatStart
+                                        Log.d(TAG, "WeChat 执行完成，耗时 ${wechatCost}ms，命中=${!wechatResult.isNullOrEmpty()}")
+                                        onWeChatTiming?.invoke(wechatCost)
+                                        if (!wechatResult.isNullOrEmpty()) {
+                                            consecutiveMisses.set(0)
+                                            consecutiveZxingMisses.set(0)
+                                            onBarcodes(ScanEngine.WECHAT, listOf(wechatResult))
+                                        }
+                                    } catch (t: Throwable) {
+                                        Log.e(TAG, "WeChat 任务异常", t)
+                                    } finally {
+                                        wechatBusy.set(false)
                                     }
-                                } finally {
-                                    wechatBusy.set(false)
                                 }
                             }
                         }
@@ -180,6 +203,7 @@ class QrAnalyzer(
     }
 
     companion object {
+        private const val TAG = "QrAnalyzer"
         private const val MAX_ZOOM_FOR_AUTO = 4f
         // ML Kit 连续 N 帧无结果后启用 ZXing 兜底；常态下（能识别的码）永远不会走到 ZXing
         private const val ZXING_FALLBACK_AFTER = 15

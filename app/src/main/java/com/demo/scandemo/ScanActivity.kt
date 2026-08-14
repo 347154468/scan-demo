@@ -85,6 +85,9 @@ class ScanActivity : AppCompatActivity() {
 
         binding.btnTorch.setOnClickListener { toggleTorch() }
         binding.btnZoom.setOnClickListener { toggleZoom() }
+        // 诊断入口：长按放大按钮，抓当前预览帧强制走 WeChat 引擎，绕开级联
+        // 用于分辨"WeChat 引擎本身没效果" vs "级联条件没触发到 WeChat"
+        binding.btnZoom.setOnLongClickListener { forceWeChatDecodeCurrentFrame(); true }
         binding.btnGallery.setOnClickListener { pickImage.launch("image/*") }
         binding.previewView.setOnTouchListener(previewTouchListener)
 
@@ -280,6 +283,42 @@ class ScanActivity : AppCompatActivity() {
             .setNegativeButton("关闭", null)
             .setOnDismissListener { resumeScan() }
             .show()
+    }
+
+    // ---------------- 诊断入口 ----------------
+
+    // 长按放大按钮触发：抓当前 PreviewView 里的一帧 Bitmap，强制送 WeChat 引擎跑一次
+    // 目的：区分"WeChat 引擎有没有能力识别当前这张码" vs "级联触发条件太严导致根本没跑到 WeChat"
+    private fun forceWeChatDecodeCurrentFrame() {
+        val bitmap = binding.previewView.bitmap
+        if (bitmap == null) {
+            Toast.makeText(this, "预览还没就绪，稍等一下再试", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val ready = WeChatFallback.isReady()
+        Log.d(TAG, "手动触发 WeChat：ready=$ready，图片 ${bitmap.width}x${bitmap.height}")
+        Toast.makeText(this, "强制 WeChat 中…（ready=$ready）", Toast.LENGTH_SHORT).show()
+        CoroutineScope(Dispatchers.Main).launch {
+            val start = System.currentTimeMillis()
+            val result = withContext(Dispatchers.Default) {
+                try { WeChatFallback.decode(bitmap) } catch (t: Throwable) {
+                    Log.e(TAG, "手动 WeChat 异常", t); null
+                }
+            }
+            val cost = System.currentTimeMillis() - start
+            binding.tvWechatStats.text = "WeChat(手动): ${cost}ms"
+            binding.tvWechatStats.visibility = View.VISIBLE
+            if (!result.isNullOrEmpty()) {
+                hasResulted.set(false)
+                onBarcodesDetected(ScanEngine.WECHAT, listOf(result))
+            } else {
+                Toast.makeText(
+                    this@ScanActivity,
+                    if (!ready) "WeChat 引擎还没初始化完，再等 1~2 秒重试" else "WeChat 引擎也识别不了这张图",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
     }
 
     // ---------------- 相册识别 ----------------

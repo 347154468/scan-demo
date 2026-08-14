@@ -44,31 +44,50 @@ object WeChatFallback {
      * 不要放在主线程 / Activity.onCreate 里同步跑。
      */
     fun init(context: Context) {
-        if (!initStarted.compareAndSet(false, true)) return
+        if (!initStarted.compareAndSet(false, true)) {
+            Log.d(TAG, "init() 已发起过，跳过（当前 ready=$ready）")
+            return
+        }
+        val t0 = System.currentTimeMillis()
         try {
+            Log.d(TAG, "开始初始化 OpenCV…")
             val loaded = OpenCV.initOpenCV()
+            val t1 = System.currentTimeMillis()
+            Log.d(TAG, "OpenCV.initOpenCV() 返回 $loaded，耗时 ${t1 - t0}ms")
             if (!loaded) {
                 ready = false
                 Log.e(TAG, "OpenCV 加载失败，本级兜底将始终不生效")
                 return
             }
+            Log.d(TAG, "开始初始化 WeChatQRCodeDetector（首次会拷贝模型 + 加载 so，可能 500ms+）…")
             WeChatQRCodeDetector.init(context.applicationContext)
+            val t2 = System.currentTimeMillis()
             ready = true
-            Log.d(TAG, "WeChat QRCode 初始化成功")
+            Log.d(TAG, "WeChatQRCodeDetector.init() 完成，耗时 ${t2 - t1}ms，总初始化耗时 ${t2 - t0}ms，ready=true")
         } catch (t: Throwable) {
             ready = false
             Log.e(TAG, "WeChat QRCode 初始化失败，本级兜底将始终不生效", t)
         }
     }
 
+    /** 供外部诊断/UI 提示；true = 引擎已加载完可用 */
+    fun isReady(): Boolean = ready
+
     /**
      * 用 WeChat 引擎解码；未就绪或推理异常一律返回 null，不影响 ML Kit / ZXing 正常工作。
      */
     fun decode(bitmap: Bitmap): String? {
-        if (!ready) return null
+        if (!ready) {
+            Log.w(TAG, "decode() 被调用但引擎未就绪（ready=false），本次跳过；请确认 init() 已完成")
+            return null
+        }
         return try {
+            val t0 = System.currentTimeMillis()
             val results = WeChatQRCodeDetector.detectAndDecode(bitmap)
-            results.firstOrNull { it.isNotEmpty() }
+            val cost = System.currentTimeMillis() - t0
+            val hit = results.firstOrNull { it.isNotEmpty() }
+            Log.d(TAG, "decode() 完成，耗时 ${cost}ms，命中 ${results.size} 个，返回：${hit?.take(60) ?: "null"}")
+            hit
         } catch (t: Throwable) {
             Log.e(TAG, "WeChat QRCode 解码异常", t)
             null
