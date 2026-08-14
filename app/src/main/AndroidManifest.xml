@@ -17,7 +17,8 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.ScanDemo"
-        tools:targetApi="31">
+        tools:targetApi="31"
+        tools:replace="android:allowBackup">
         <activity
             android:name=".ScanActivity"
             android:exported="true"
